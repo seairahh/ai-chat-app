@@ -2,13 +2,19 @@ import requests
 import streamlit as st
 from datetime import datetime
 import uuid
+import json
+from pathlib import Path
 
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+CHATS_DIR = Path("chats")
+
+# Ensure chats directory exists
+CHATS_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(page_title="My AI Chat", layout="wide")
 st.title("My AI Chat")
-st.caption("Task 1 - Part C: Chat management")
+st.caption("Task 1 - Part D: Chat persistence")
 
 # Requirement: load token using st.secrets["HF_TOKEN"] and do not crash if missing.
 try:
@@ -23,18 +29,65 @@ if not hf_token:
     )
     st.stop()
 
-# ── Multi-chat session state ──────────────────────────────────────────────────
+# ── Helper functions for JSON persistence ─────────────────────────────────────
+def save_chat(chat_id: str, chat_data: dict):
+    """Save a chat to a JSON file in the chats/ directory."""
+    file_path = CHATS_DIR / f"{chat_id}.json"
+    with open(file_path, "w") as f:
+        json.dump(chat_data, f, indent=2)
+
+def load_chat(chat_id: str) -> dict:
+    """Load a chat from a JSON file."""
+    file_path = CHATS_DIR / f"{chat_id}.json"
+    if file_path.exists():
+        with open(file_path, "r") as f:
+            return json.load(f)
+    return None
+
+def delete_chat_file(chat_id: str):
+    """Delete a chat's JSON file from disk."""
+    file_path = CHATS_DIR / f"{chat_id}.json"
+    if file_path.exists():
+        file_path.unlink()
+
+def load_all_chats() -> dict:
+    """Load all chats from the chats/ directory."""
+    chats = {}
+    for file_path in CHATS_DIR.glob("*.json"):
+        try:
+            with open(file_path, "r") as f:
+                chat_data = json.load(f)
+                chat_id = chat_data.get("id", file_path.stem)
+                chats[chat_id] = chat_data
+        except Exception:
+            pass
+    return chats
+
+def generate_title_from_message(text: str, max_length: int = 30) -> str:
+    """Generate a chat title from the first user message."""
+    text = text.strip()
+    if len(text) <= max_length:
+        return text
+    return text[:max_length].rstrip() + "…"
+
+# ── Multi-chat session state with persistence ──────────────────────────────────
 if "chats" not in st.session_state:
-    st.session_state.chats = {}
+    # Load all existing chats from disk
+    st.session_state.chats = load_all_chats()
+    
+    # If no chats exist, create the first one
+    if not st.session_state.chats:
+        new_id = str(uuid.uuid4())
+        st.session_state.chats[new_id] = {
+            "id": new_id,
+            "title": "Chat 1",
+            "timestamp": datetime.now().isoformat(),
+            "messages": [],
+        }
+        save_chat(new_id, st.session_state.chats[new_id])
 
 if "current_chat_id" not in st.session_state:
-    new_id = str(uuid.uuid4())
-    st.session_state.chats[new_id] = {
-        "title": "Chat 1",
-        "timestamp": datetime.now().isoformat(),
-        "messages": [],
-    }
-    st.session_state.current_chat_id = new_id
+    st.session_state.current_chat_id = next(iter(st.session_state.chats))
 
 # ── Sidebar: New Chat button and chat list ────────────────────────────────────
 with st.sidebar:
@@ -43,11 +96,14 @@ with st.sidebar:
     if st.button("➕ New Chat", use_container_width=True):
         new_id = str(uuid.uuid4())
         chat_count = len(st.session_state.chats) + 1
-        st.session_state.chats[new_id] = {
+        new_chat = {
+            "id": new_id,
             "title": f"Chat {chat_count}",
             "timestamp": datetime.now().isoformat(),
             "messages": [],
         }
+        st.session_state.chats[new_id] = new_chat
+        save_chat(new_id, new_chat)
         st.session_state.current_chat_id = new_id
         st.rerun()
     
@@ -76,7 +132,10 @@ with st.sidebar:
                 key=f"delete_{chat_id}",
                 help="Delete this chat",
             ):
+                # Delete from disk
+                delete_chat_file(chat_id)
                 del st.session_state.chats[chat_id]
+                
                 # If deleted chat was active, switch to another
                 if st.session_state.current_chat_id == chat_id:
                     if st.session_state.chats:
@@ -86,11 +145,14 @@ with st.sidebar:
                     else:
                         # No chats left, create a new one
                         new_id = str(uuid.uuid4())
-                        st.session_state.chats[new_id] = {
+                        new_chat = {
+                            "id": new_id,
                             "title": "Chat 1",
                             "timestamp": datetime.now().isoformat(),
                             "messages": [],
                         }
+                        st.session_state.chats[new_id] = new_chat
+                        save_chat(new_id, new_chat)
                         st.session_state.current_chat_id = new_id
                 st.rerun()
 
@@ -106,6 +168,14 @@ prompt = st.chat_input("Type your message...")
 
 if prompt:
     current_chat["messages"].append({"role": "user", "content": prompt})
+    
+    # Auto-generate title from first message if it's still a default
+    if len(current_chat["messages"]) == 1 and current_chat["title"].startswith("Chat"):
+        current_chat["title"] = generate_title_from_message(prompt)
+    
+    # Save to disk after adding user message
+    save_chat(st.session_state.current_chat_id, current_chat)
+    
     with st.chat_message("user"):
         st.write(prompt)
 
@@ -163,3 +233,5 @@ if prompt:
                 current_chat["messages"].append(
                     {"role": "assistant", "content": assistant_reply}
                 )
+                # Save to disk after adding assistant response
+                save_chat(st.session_state.current_chat_id, current_chat)
