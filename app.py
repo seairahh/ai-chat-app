@@ -4,6 +4,7 @@ from datetime import datetime
 import uuid
 import json
 from pathlib import Path
+import time
 
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -14,7 +15,7 @@ CHATS_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(page_title="My AI Chat", layout="wide")
 st.title("My AI Chat")
-st.caption("Task 1 - Part D: Chat persistence")
+st.caption("Task 1-2: Chat persistence + Response streaming")
 
 # Requirement: load token using st.secrets["HF_TOKEN"] and do not crash if missing.
 try:
@@ -69,6 +70,44 @@ def generate_title_from_message(text: str, max_length: int = 30) -> str:
     if len(text) <= max_length:
         return text
     return text[:max_length].rstrip() + "…"
+
+def stream_response(response, placeholder):
+    """
+    Parse SSE stream from Hugging Face API and update placeholder incrementally.
+    Returns the full concatenated response text.
+    """
+    full_response = ""
+    
+    try:
+        for line in response.iter_lines():
+            if not line:
+                continue
+            
+            # Parse SSE format: "data: {json}"
+            line_str = line.decode("utf-8") if isinstance(line, bytes) else line
+            if line_str.startswith("data: "):
+                try:
+                    json_str = line_str[6:]  # Remove "data: " prefix
+                    if json_str == "[DONE]":
+                        break
+                    
+                    data = json.loads(json_str)
+                    delta = data.get("choices", [{}])[0].get("delta", {})
+                    token = delta.get("content", "")
+                    
+                    if token:
+                        full_response += token
+                        # Update placeholder with accumulated response
+                        placeholder.write(full_response)
+                        # Add small delay for visibility
+                        time.sleep(0.02)
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass
+    except Exception as e:
+        placeholder.error(f"Streaming error: {e}")
+        return None
+    
+    return full_response if full_response else None
 
 # ── Multi-chat session state with persistence ──────────────────────────────────
 if "chats" not in st.session_state:
@@ -182,12 +221,14 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             assistant_reply = None
+            response_placeholder = st.empty()
 
             headers = {"Authorization": f"Bearer {hf_token}"}
             payload = {
                 "model": MODEL,
                 "messages": current_chat["messages"],
                 "max_tokens": 512,
+                "stream": True,
             }
 
             try:
@@ -196,38 +237,39 @@ if prompt:
                     headers=headers,
                     json=payload,
                     timeout=30,
+                    stream=True,
                 )
 
                 if response.status_code == 200:
-                    data = response.json()
-                    assistant_reply = data["choices"][0]["message"]["content"]
-                    st.write(assistant_reply)
+                    assistant_reply = stream_response(response, response_placeholder)
+                    if assistant_reply is None:
+                        assistant_reply = "Streaming completed but no content received."
                 elif response.status_code in {401, 403}:
                     assistant_reply = (
                         "I could not access the model because the Hugging Face token "
                         "is invalid (401/403)."
                     )
-                    st.error(assistant_reply)
+                    response_placeholder.error(assistant_reply)
                 elif response.status_code == 429:
                     assistant_reply = (
                         "I am currently rate limited by Hugging Face (429). "
                         "Please wait and try again."
                     )
-                    st.warning(assistant_reply)
+                    response_placeholder.warning(assistant_reply)
                 else:
                     assistant_reply = (
                         f"API error {response.status_code}: {response.text}"
                     )
-                    st.error(assistant_reply)
+                    response_placeholder.error(assistant_reply)
             except requests.exceptions.Timeout:
                 assistant_reply = "Network timeout. Please try again."
-                st.error(assistant_reply)
+                response_placeholder.error(assistant_reply)
             except requests.exceptions.RequestException as exc:
                 assistant_reply = f"Network error: {exc}"
-                st.error(assistant_reply)
+                response_placeholder.error(assistant_reply)
             except Exception as exc:
                 assistant_reply = f"Unexpected error: {exc}"
-                st.error(assistant_reply)
+                response_placeholder.error(assistant_reply)
 
             if assistant_reply is not None:
                 current_chat["messages"].append(
