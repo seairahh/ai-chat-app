@@ -5,6 +5,16 @@ import requests
 st.set_page_config(page_title="AI Chat", page_icon="🤖")
 st.title("🤖 AI Chat")
 
+
+def is_placeholder_token(token: str) -> bool:
+    normalized = token.strip()
+    placeholder_values = {
+        "hf_your_real_token_here",
+        "paste_your_hugging_face_token_here",
+        "your_token_here",
+    }
+    return normalized in placeholder_values or "your_real_token_here" in normalized
+
 # ── Token check ────────────────────────────────────────────────────────────────
 if "HF_TOKEN" not in st.secrets:
     st.error(
@@ -13,7 +23,15 @@ if "HF_TOKEN" not in st.secrets:
     )
     st.stop()
 
-hf_token = st.secrets["HF_TOKEN"]
+hf_token = st.secrets["HF_TOKEN"].strip()
+
+if not hf_token or is_placeholder_token(hf_token):
+    st.error(
+        "Your Hugging Face token is still a placeholder. "
+        "Go to Hugging Face token settings, create a real token, then paste it into "
+        "the Streamlit Cloud Secrets box as `HF_TOKEN = \"hf_...\"`."
+    )
+    st.stop()
 
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -55,6 +73,12 @@ if user_input:
                     st.write(reply)
                     st.session_state.messages.append(
                         {"role": "assistant", "content": reply}
+                    )
+                elif response.status_code in {401, 403}:
+                    st.error(
+                        "Your Hugging Face token was rejected. "
+                        "Make sure you pasted a real token into Streamlit Cloud Secrets "
+                        "and redeployed the app."
                     )
                 elif response.status_code == 429:
                     st.warning("Rate limit reached. Please wait a moment and try again.")
