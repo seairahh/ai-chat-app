@@ -9,13 +9,14 @@ import time
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 CHATS_DIR = Path("chats")
+MEMORY_FILE = Path("memory.json")
 
 # Ensure chats directory exists
 CHATS_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(page_title="My AI Chat", layout="wide")
 st.title("My AI Chat")
-st.caption("Task 1-2: Chat persistence + Response streaming")
+st.caption("Task 1-3: Chat persistence + Streaming + User Memory")
 
 # Requirement: load token using st.secrets["HF_TOKEN"] and do not crash if missing.
 try:
@@ -109,6 +110,98 @@ def stream_response(response, placeholder):
     
     return full_response if full_response else None
 
+# ── Helper functions for User Memory ──────────────────────────────────────────
+def load_memory() -> dict:
+    """Load user memory from memory.json."""
+    if MEMORY_FILE.exists():
+        try:
+            with open(MEMORY_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_memory(memory: dict):
+    """Save user memory to memory.json."""
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(memory, f, indent=2)
+
+def extract_user_traits(user_message: str, hf_token: str) -> dict:
+    """
+    Make a lightweight API call to extract personal traits/preferences 
+    from the user message.
+    """
+    extraction_prompt = (
+        f"Given this user message, extract any personal facts, preferences, "
+        f"or traits (e.g., name, interests, style, favorite topics). "
+        f"Return ONLY a valid JSON object with keys as trait categories. "
+        f"If none found, return {{}}. "
+        f"User message: \"{user_message}\""
+    )
+    
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": extraction_prompt}],
+        "max_tokens": 256,
+        "stream": False,
+    }
+    
+    try:
+        response = requests.post(
+            HF_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            reply = data["choices"][0]["message"]["content"]
+            # Try to extract JSON from the reply
+            try:
+                # Find JSON in the response
+                start = reply.find("{")
+                end = reply.rfind("}") + 1
+                if start >= 0 and end > start:
+                    json_str = reply[start:end]
+                    extracted = json.loads(json_str)
+                    return extracted if isinstance(extracted, dict) else {}
+            except (json.JSONDecodeError, ValueError):
+                pass
+    except Exception:
+        pass
+    
+    return {}
+
+def merge_memory(existing: dict, new_traits: dict) -> dict:
+    """Merge new extracted traits with existing memory."""
+    merged = existing.copy()
+    for key, value in new_traits.items():
+        if key in merged:
+            # If value is a list, append if not already present
+            if isinstance(merged[key], list) and value not in merged[key]:
+                merged[key].append(value)
+            elif not isinstance(merged[key], list):
+                # Convert to list if mixing types
+                if merged[key] != value:
+                    merged[key] = [merged[key], value]
+        else:
+            merged[key] = value
+    return merged
+
+def build_memory_prompt(memory: dict) -> str:
+    """Build a system prompt injection from stored memory."""
+    if not memory:
+        return ""
+    
+    memory_str = json.dumps(memory, indent=2)
+    return (
+        f"\nKnown user information:\n{memory_str}\n"
+        f"Use this information to personalize your responses and demonstrate "
+        f"that you remember the user's preferences and characteristics."
+    )
+
 # ── Multi-chat session state with persistence ──────────────────────────────────
 if "chats" not in st.session_state:
     # Load all existing chats from disk
@@ -195,6 +288,21 @@ with st.sidebar:
                         st.session_state.current_chat_id = new_id
                 st.rerun()
 
+# ── Sidebar: User Memory panel ─────────────────────────────────────────────────
+with st.sidebar.expander("👤 User Memory", expanded=False):
+    current_memory = load_memory()
+    if current_memory:
+        st.write("**Stored traits:**")
+        for key, value in current_memory.items():
+            st.write(f"• {key}: {value}")
+    else:
+        st.write("No stored traits yet. They will be extracted as you chat.")
+    
+    if st.button("🗑️ Clear Memory", key="clear_memory_btn"):
+        save_memory({})
+        st.success("Memory cleared!")
+        st.rerun()
+
 # ── Main area: Messages and input ──────────────────────────────────────────────
 current_chat = st.session_state.chats[st.session_state.current_chat_id]
 
@@ -224,9 +332,19 @@ if prompt:
             response_placeholder = st.empty()
 
             headers = {"Authorization": f"Bearer {hf_token}"}
+            # Build system message with memory context for personalization
+            current_memory = load_memory()
+            memory_context = build_memory_prompt(current_memory)
+            system_message = f"You are a helpful AI assistant. {memory_context}"
+            
+            # Build messages with system prompt injection
+            messages_to_send = [
+                {"role": "system", "content": system_message}
+            ] + current_chat["messages"]
+            
             payload = {
                 "model": MODEL,
-                "messages": current_chat["messages"],
+                "messages": messages_to_send,
                 "max_tokens": 512,
                 "stream": True,
             }
@@ -277,3 +395,10 @@ if prompt:
                 )
                 # Save to disk after adding assistant response
                 save_chat(st.session_state.current_chat_id, current_chat)
+                
+                # Extract user traits from the user's message and update memory
+                extracted_traits = extract_user_traits(prompt, hf_token)
+                if extracted_traits:
+                    current_memory = load_memory()
+                    updated_memory = merge_memory(current_memory, extracted_traits)
+                    save_memory(updated_memory)
