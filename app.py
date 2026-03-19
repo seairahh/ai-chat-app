@@ -1,91 +1,76 @@
-import streamlit as st
 import requests
-
-# ── Page config ────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="AI Chat", page_icon="🤖")
-st.title("🤖 AI Chat")
-
-
-def is_placeholder_token(token: str) -> bool:
-    normalized = token.strip()
-    placeholder_values = {
-        "hf_your_real_token_here",
-        "paste_your_hugging_face_token_here",
-        "your_token_here",
-    }
-    return normalized in placeholder_values or "your_real_token_here" in normalized
-
-# ── Token check ────────────────────────────────────────────────────────────────
-if "HF_TOKEN" not in st.secrets:
-    st.error(
-        "Hugging Face token not found. "
-        "Add `HF_TOKEN` to your `.streamlit/secrets.toml` file and restart the app."
-    )
-    st.stop()
-
-hf_token = st.secrets["HF_TOKEN"].strip()
-
-if not hf_token or is_placeholder_token(hf_token):
-    st.error(
-        "Your Hugging Face token is still a placeholder. "
-        "Go to Hugging Face token settings, create a real token, then paste it into "
-        "the Streamlit Cloud Secrets box as `HF_TOKEN = \"hf_...\"`."
-    )
-    st.stop()
+import streamlit as st
 
 HF_ENDPOINT = "https://router.huggingface.co/v1/chat/completions"
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
-# ── Chat history in session state ──────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+st.set_page_config(page_title="My AI Chat", layout="wide")
+st.title("My AI Chat")
+st.caption("Task 1 - Part A: Page setup and API test connection")
 
-# ── Display existing messages ──────────────────────────────────────────────────
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
+# Requirement: load token using st.secrets["HF_TOKEN"] and do not crash if missing.
+try:
+    hf_token = st.secrets["HF_TOKEN"].strip()
+except Exception:
+    hf_token = ""
 
-# ── Chat input ─────────────────────────────────────────────────────────────────
-user_input = st.chat_input("Ask me anything...")
+if not hf_token:
+    st.error(
+        "Missing Hugging Face token. Add HF_TOKEN to Streamlit secrets "
+        "and rerun the app."
+    )
+    st.stop()
 
-if user_input:
-    # Show user message immediately
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.write(user_input)
+st.subheader("API Connection Test")
+st.write("Sending hardcoded test message: **Hello!**")
 
-    # Call Hugging Face Inference Router
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                headers = {"Authorization": f"Bearer {hf_token}"}
-                payload = {
-                    "model": MODEL,
-                    "messages": st.session_state.messages,
-                    "max_tokens": 512,
-                }
-                response = requests.post(
-                    HF_ENDPOINT, headers=headers, json=payload, timeout=30
+if "part_a_response" not in st.session_state and "part_a_error" not in st.session_state:
+    with st.spinner("Contacting Hugging Face API..."):
+        try:
+            headers = {"Authorization": f"Bearer {hf_token}"}
+            payload = {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello!"}],
+                "max_tokens": 512,
+            }
+            response = requests.post(
+                HF_ENDPOINT,
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                st.session_state.part_a_response = data["choices"][0]["message"]["content"]
+            elif response.status_code in {401, 403}:
+                st.session_state.part_a_error = (
+                    "Invalid Hugging Face token (401/403). "
+                    "Check Streamlit secrets and try again."
                 )
+            elif response.status_code == 429:
+                st.session_state.part_a_error = (
+                    "Rate limit reached (429). Wait a moment and rerun."
+                )
+            else:
+                st.session_state.part_a_error = (
+                    f"API error {response.status_code}: {response.text}"
+                )
+        except requests.exceptions.Timeout:
+            st.session_state.part_a_error = "Network timeout. Please rerun the app."
+        except requests.exceptions.RequestException as exc:
+            st.session_state.part_a_error = f"Network error: {exc}"
+        except Exception as exc:
+            st.session_state.part_a_error = f"Unexpected error: {exc}"
 
-                if response.status_code == 200:
-                    reply = response.json()["choices"][0]["message"]["content"]
-                    st.write(reply)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": reply}
-                    )
-                elif response.status_code in {401, 403}:
-                    st.error(
-                        "Your Hugging Face token was rejected. "
-                        "Make sure you pasted a real token into Streamlit Cloud Secrets "
-                        "and redeployed the app."
-                    )
-                elif response.status_code == 429:
-                    st.warning("Rate limit reached. Please wait a moment and try again.")
-                else:
-                    st.error(f"API error {response.status_code}: {response.text}")
+if "part_a_response" in st.session_state:
+    st.success("API call succeeded.")
+    st.markdown("**Model response:**")
+    st.write(st.session_state.part_a_response)
+elif "part_a_error" in st.session_state:
+    st.error(st.session_state.part_a_error)
 
-            except requests.exceptions.Timeout:
-                st.error("Request timed out. The model may be busy — please try again.")
-            except Exception as e:
-                st.error(f"Unexpected error: {e}")
+if st.button("Rerun API Test"):
+    st.session_state.pop("part_a_response", None)
+    st.session_state.pop("part_a_error", None)
+    st.rerun()
